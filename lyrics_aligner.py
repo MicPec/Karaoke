@@ -45,6 +45,13 @@ class LyricsSlice:
     words: list[Word]
     raw_text: str | None = None
 
+    @classmethod
+    def from_dict(cls, data: dict) -> LyricsSlice:
+        return cls(
+            words=[Word(w["text"], w["start"], w["end"]) for w in data["words"]],
+            raw_text=data.get("raw_text", None),
+        )
+
     def __str__(self):
         return " ".join(word.text.strip() for word in self.words)
 
@@ -159,12 +166,11 @@ class Lyrics:
             if not search_space:
                 return LyricsSlice([])
 
-        # Find the best starting position in self.words that matches our search words
-        # best_match_start = 0
+        # Find the best starting position
         best_match_score = 0
         best_matched_words = []
 
-        # Try each possible starting position in self.words
+        # Try each possible starting position
         for start_idx in range(len(search_space) - len(search_words) + 1):
             current_words = search_space[start_idx : start_idx + len(search_words) + 1]
             current_score = 0
@@ -183,7 +189,6 @@ class Lyrics:
                 else:
                     matched.append(None)
 
-            # Normalize score by number of words
             avg_score = current_score / len(search_words)
 
             if avg_score > best_match_score:
@@ -191,7 +196,6 @@ class Lyrics:
                 # best_match_start = start_idx
                 best_matched_words = matched
 
-        # Filter out None values and return the slice
         result = [w for w in best_matched_words if w is not None]
         return LyricsSlice(result, text)
 
@@ -206,6 +210,7 @@ class Lyrics:
         self.slices = []
         last_slice_end = 0.0
         for line in self.raw_lyrics:
+            # TODO: try to use get_words_slice or get_time_slice first and compare with lyrics, use get_text_slice as a fallback
             slice = self.get_text_slice(
                 line, after=last_slice_end, similarity_threshold=similarity_threshold
             )
@@ -220,6 +225,7 @@ class Lyrics:
                 if slice.words:
                     last_slice_end = slice.end
                     self.slices.append(slice)
+
         return self.slices
 
     def check_time_overlap(self, slice1, slice2) -> bool:
@@ -246,14 +252,10 @@ class Lyrics:
                 return False
         return True
 
-    def fix_alignment(self, max_try: int = 100, min_gap: float = 0.1, max_stretch: float = 0.5):
-        """Fix timing alignment issues between lyric slices.
-        
-        Args:
-            max_try: Maximum number of attempts to fix alignment
-            min_gap: Minimum gap between slices in seconds
-            max_stretch: Maximum amount a slice can be stretched/compressed
-        """
+    def fix_alignment(
+        self, max_try: int = 100, min_gap: float = 0.1, max_stretch: float = 0.5
+    ):
+        # FIXME: this implementation is not working properly
         if not self.slices:
             return self.slices
 
@@ -270,36 +272,22 @@ class Lyrics:
                 if not current_slice.words or not next_slice.words:
                     continue
 
-                # Handle overlaps
-                if self.check_time_overlap(current_slice, next_slice):
-                    overlap = current_slice.end - next_slice.start
-                    # If overlap is small, split the difference
-                    if overlap < max_stretch:
-                        current_slice.stretch(-overlap/2)
-                        next_slice.shift(overlap/2)
-                    else:
-                        # For larger overlaps, try to preserve the timing of the slice
-                        # that better matches its transcribed words
-                        curr_conf = sum(1 for w in current_slice.words if any(tw.text.lower() == w.text.lower() for tw in self.words))
-                        next_conf = sum(1 for w in next_slice.words if any(tw.text.lower() == w.text.lower() for tw in self.words))
-                        
-                        if curr_conf >= next_conf:
-                            next_slice.shift(overlap + min_gap)
-                        else:
-                            current_slice.stretch(-overlap - min_gap)
-                    modified = True
-
                 # Handle gaps
                 elif not self.check_time_continuation(current_slice, next_slice):
                     gap = next_slice.start - current_slice.end
                     if gap > min_gap:
                         # Look for any transcribed words in the gap
-                        gap_words = [w for w in self.words 
-                                   if w.start > current_slice.end and w.end < next_slice.start]
-                        
+                        gap_words = [
+                            w
+                            for w in self.words
+                            if w.start > current_slice.end and w.end < next_slice.start
+                        ]
+
                         if gap_words:
                             # Adjust slices to better match found words
-                            current_slice.stretch(gap_words[0].start - current_slice.end)
+                            current_slice.stretch(
+                                gap_words[0].start - current_slice.end
+                            )
                             next_slice.shift(-(next_slice.start - gap_words[-1].end))
                         else:
                             # No words in gap, distribute it proportionally
@@ -312,11 +300,42 @@ class Lyrics:
                                 next_slice.shift(-gap_share)
                         modified = True
 
+                # Handle overlaps
+                if self.check_time_overlap(current_slice, next_slice):
+                    overlap = current_slice.end - next_slice.start
+                    # If overlap is small, split the difference
+                    if overlap < max_stretch:
+                        current_slice.stretch(-overlap / 2)
+                        next_slice.shift(overlap / 2)
+                    else:
+                        # For larger overlaps, try to preserve the timing of the slice
+                        # that better matches its transcribed words
+                        curr_conf = sum(
+                            1
+                            for w in current_slice.words
+                            if any(
+                                tw.text.lower() == w.text.lower() for tw in self.words
+                            )
+                        )
+                        next_conf = sum(
+                            1
+                            for w in next_slice.words
+                            if any(
+                                tw.text.lower() == w.text.lower() for tw in self.words
+                            )
+                        )
+
+                        if curr_conf >= next_conf:
+                            next_slice.shift(overlap + min_gap)
+                        else:
+                            current_slice.stretch(-overlap - min_gap)
+                    modified = True
+
             # Second pass: Ensure proper sequence and minimal gaps
             if modified:
                 # Sort slices by start time
-                self.slices.sort(key=lambda x: x.start if x.words else float('inf'))
-                
+                self.slices.sort(key=lambda x: x.start if x.words else float("inf"))
+
                 # Ensure minimal gaps between slices
                 for i in range(len(self.slices) - 1):
                     current = self.slices[i]
@@ -330,7 +349,9 @@ class Lyrics:
                 break  # No changes made, exit loop
 
         # Final pass: Ensure reasonable durations for each slice
-        avg_duration = sum(s.end - s.start for s in self.slices if s.words) / len([s for s in self.slices if s.words])
+        avg_duration = sum(s.end - s.start for s in self.slices if s.words) / len(
+            [s for s in self.slices if s.words]
+        )
         for slice in self.slices:
             if slice.words:
                 duration = slice.end - slice.start
@@ -360,21 +381,27 @@ class LyricsAligner:
         )
         self.transcription = None
 
-    def save_track(self, path: Path, audio: torch.Tensor, sr: int = 44100):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            torchaudio.save(path, audio, sr)
-            print(f"Saved {path}")
-        except IOError:
-            print(f"Error saving {path}")
-            raise
+    def get_vocals(self):
+        return self.vocals_path
+
+    def get_instr(self):
+        return self.instr_path
+
+    def get_lyrics(self):
+        if self.aligned_lyrics_path.exists():
+            print(f"Reading aligned lyrics from {self.aligned_lyrics_path}")
+            with open(self.aligned_lyrics_path, "r") as f:
+                return json.load(f)
+        else:
+            print(f"No aligned lyrics file found at {self.aligned_lyrics_path}")
+            return None
 
     def process_audio(self, overwrite: bool = False):
         if self.vocals_path.exists() and self.instr_path.exists() and not overwrite:
             print("Audio already processed.")
         else:
             self.process_audio_file()
-        
+
         lyrics = ""
         if self.lyrics_path.exists():
             print(f"Reading lyrics from {self.lyrics_path}")
@@ -386,7 +413,7 @@ class LyricsAligner:
 
         print("Transcribing audio...")
         self.transcription = self.transcribe_audio()
-        
+
         print("Aligning lyrics...")
         aligner = Lyrics(self.transcription)
         aligner.align_lyrics(lyrics)
@@ -461,6 +488,15 @@ class LyricsAligner:
             print(f"Error processing audio file: {e}")
             raise
 
+    def save_track(self, path: Path, audio: torch.Tensor, sr: int = 44100):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            torchaudio.save(path, audio, sr)
+            print(f"Saved {path}")
+        except IOError:
+            print(f"Error saving {path}")
+            raise
+
     def transcribe_audio(self, model_size: str = "large") -> dict:
         try:
             print("Loading model...")
@@ -521,15 +557,16 @@ if __name__ == "__main__":
     try:
         print(f"Processing audio file: {args.audio}")
         karaoke = LyricsAligner(Path(args.audio))
-        
+
         # If lyrics file is specified, copy it to the expected location
         if args.lyrics:
             from shutil import copy2
+
             copy2(args.lyrics, karaoke.lyrics_path)
 
         # Process audio and get aligned lyrics
         aligned_lyrics = karaoke.process_audio(overwrite=args.overwrite)
-        
+
         if aligned_lyrics is None:
             print(f"\nPlease create a lyrics file at: {karaoke.lyrics_path}")
             exit(1)
