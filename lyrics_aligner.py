@@ -10,12 +10,6 @@ import re
 from dataclasses import dataclass
 from typing import TypeVar
 
-# =========================================
-# FILE_PATH = Path("/home/michal/DEV/Karaoke/rower.mp3")
-# FILE_PATH = Path("/home/michal/DEV/Karaoke/youre_the_one_that_i_want.mp3")
-# =========================================
-
-# LYRICS_FILE_PATH = FILE_PATH.with_suffix(".txt")
 
 CACHE_DIR = Path("cache")
 STRIP_CHARS = " ,.!?()[]\"'"
@@ -41,13 +35,13 @@ LyricsSlice = TypeVar("LyricsSlice")
 @dataclass
 class LyricsSlice:
     words: list[Word]
-    raw_text: str | None = None
+    text: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> LyricsSlice:
         return cls(
             words=[Word(w["text"], w["start"], w["end"]) for w in data["words"]],
-            raw_text=data.get("raw_text", None),
+            text=data.get("raw_text", None),
         )
 
     def __str__(self):
@@ -106,7 +100,7 @@ class LyricsSlice:
             "words": [
                 {"text": w.text, "start": w.start, "end": w.end} for w in self.words
             ],
-            "raw_text": self.raw_text,
+            "raw_text": self.text,
         }
 
 
@@ -130,6 +124,12 @@ class Lyrics:
     def __str__(self) -> str:
         return self.__repr__()
 
+    def __len__(self) -> int:
+        return len(self.slices)
+
+    def __getitem__(self, index: int) -> LyricsSlice:
+        return self.slices[index]
+
     def get_time_slice(self, start: float, end: float) -> LyricsSlice:
         result = [
             word for word in self.words if word.start >= start and word.end <= end
@@ -147,101 +147,52 @@ class Lyrics:
         return None
 
     def get_text_slice(
-        self, text: str, *, similarity_threshold: float, after: float | None = None
-    ) -> LyricsSlice:
-        search_words = [w.strip(STRIP_CHARS).lower() for w in text.split()]
-        if not search_words:
-            return LyricsSlice([])
-
-        if after is not None:
-            search_space = [w for w in self.words if w.start >= after]
-            if not search_space:
-                return LyricsSlice([])
-        else:
-            search_space = self.words
-
-        # Find the best starting position
-        best_match_score = 0
-        best_matched_words = []
-
-        # Try each possible starting position
-        for start_idx in range(len(search_space) - len(search_words) + 1):
-            current_words = search_space[start_idx : start_idx + len(search_words)]
-            current_score = 0
-            matched = []
-
-            # Compare each word pair
-            for search_word, word in zip(search_words, current_words):
-                # Use difflib to compute similarity
-                similarity = difflib.SequenceMatcher(
-                    None, search_word, word.text.lower()
-                ).ratio()
-
-                if similarity >= similarity_threshold:
-                    current_score += similarity
-                    matched.append(word)
-                else:
-                    matched.append(None)
-
-            avg_score = current_score / len(search_words)
-
-            if avg_score > best_match_score:
-                best_match_score = avg_score
-                # best_match_start = start_idx
-                best_matched_words = matched
-
-        result = [w for w in best_matched_words if w is not None]
-        similarity = difflib.SequenceMatcher(
-            None, " ".join([w.text for w in result]), text
-        ).ratio()
-        # print(f"{text} -> {[w.text for w in result]} (similarity: {similarity})")
-
-        return LyricsSlice(result, text)
-
-    def get_text_slice2(
-        self, text: str, *, similarity_threshold: float, after: float = None
+        self, text: str, *, similarity_threshold: float, after: float = -1.0
     ) -> LyricsSlice:
         search_sentence = " ".join([w.strip(STRIP_CHARS).lower() for w in text.split()])
         sentence_len = len(search_sentence.split())
         print(f"Searching for: {search_sentence}")
         best_sentence = None
         best_similarity = 0.0
-        # TODO: add window to search  and search entire as a fallback
-        for pos in range(0, len(self.words) - sentence_len + 1):
-            sentence = self.get_words_pos_slice(pos, pos + sentence_len)
 
-            similarity = difflib.SequenceMatcher(
-                None, search_sentence, str(sentence).lower()
-            ).ratio()
+        start_idx = next(
+            (i for i, word in enumerate(self.words) if word.start >= after), None
+        )
+        if start_idx is None or start_idx + sentence_len > len(self.words):
+            return LyricsSlice([])
+        try_number = 0
+        while try_number < 2:
+            for pos in range(start_idx, len(self.words) - sentence_len + 1):
+                sentence = self.get_words_pos_slice(pos, pos + sentence_len)
 
-            if similarity == 1:
-                return sentence
+                similarity = difflib.SequenceMatcher(
+                    None, search_sentence, str(sentence).lower()
+                ).ratio()
 
-            if similarity > best_similarity:
-                best_sentence = sentence
-                best_similarity = similarity
+                if similarity == 1:
+                    return LyricsSlice(sentence.words, text)
 
-        return best_sentence
+                if similarity > best_similarity:
+                    best_sentence = sentence
+                    best_similarity = similarity
+
+            if best_similarity >= similarity_threshold:
+                return LyricsSlice(best_sentence.words, text)
+            try_number += 1
+            start_idx = 0
+
+        return LyricsSlice([])
 
     def create_lyric_slices(self, lyrics: str, *, similarity_threshold: float = 0.8):
         self.raw_lyrics = lyrics.splitlines()
         self.slices = []
         last_slice_end = 0.0
         for line in self.raw_lyrics:
-            slice = self.get_text_slice2(
+            slice = self.get_text_slice(
                 line, after=last_slice_end, similarity_threshold=similarity_threshold
             )
-            if slice.words:
-                last_slice_end = slice.end
-                self.slices.append(slice)
-            else:
-                # If no match found after last_slice_end, try searching in the whole text
-                slice = self.get_text_slice2(
-                    line, similarity_threshold=similarity_threshold
-                )
-                if slice.words:
-                    last_slice_end = slice.end
-                    self.slices.append(slice)
+            self.slices.append(slice)
+            last_slice_end = slice.end
 
         return self.slices
 
@@ -252,8 +203,8 @@ class Lyrics:
             return False
 
     def check_time_continuation(self, slice1, slice2) -> bool:
-        if not slice1.words or not slice2.words:
-            return True  # Consider empty slices as valid continuations
+        # if not slice1.words or not slice2.words:
+        #     return True  # Consider empty slices as valid continuations
         if slice1.end <= slice2.start:
             return True
         else:
@@ -269,26 +220,22 @@ class Lyrics:
                 return False
         return True
 
-    def fix_alignment(
-        self, max_try: int = 100, min_gap: float = 0.1, max_stretch: float = 0.8
-    ):
-        # FIXME: this implementation is not working properly
-        if not self.slices:
-            return self.slices
+    # def fix_alignment(
+    #     self, max_try: int = 100, min_gap: float = 0.1, max_stretch: float = 0.8
+    # ):
+    #     # FIXME: this implementation is not working properly
+    #     if not self.slices:
+    #         return self.slices
 
-        try_num = 0
-        while not self.check_alignment() and try_num < max_try:
-            try_num += 1
-            modified = False
+    #     try_num = 0
+    #     while not self.check_alignment() and try_num < max_try:
+    #         try_num += 1
+    #         modified = False
 
-            # First pass: Fix major overlaps and gaps
-            for i in range(len(self.slices) - 1):
-                pass
-        return self.slices
-
-    def save_alignment(self, path: Path):
-        with open(path, "w") as f:
-            json.dump([slice.to_dict() for slice in self.slices], f, indent=2)
+    #         # First pass: Fix major overlaps and gaps
+    #         for i in range(len(self.slices) - 1):
+    #             pass
+    #     return self.slices
 
 
 class LyricsAligner:
@@ -299,6 +246,9 @@ class LyricsAligner:
         self.vocals_path = self.cache_dir / f"{self.audio_file.stem}.vocals.mp3"
         self.instr_path = self.cache_dir / f"{self.audio_file.stem}.instr.mp3"
         self.lyrics_path = self.cache_dir / f"{self.audio_file.stem}.lyrics.txt"
+        self.transcription_path = (
+            self.cache_dir / f"{self.audio_file.stem}.transcription.json"
+        )
         self.aligned_lyrics_path = (
             self.cache_dir / f"{self.audio_file.stem}.aligned_lyrics.json"
         )
@@ -337,11 +287,9 @@ class LyricsAligner:
         else:
             self.process_audio_file()
 
-        lyrics = ""
+        raw_lyrics = ""
         if self.lyrics_path.exists():
-            print(f"Reading lyrics from {self.lyrics_path}")
-            with open(self.lyrics_path, "r") as f:
-                lyrics = f.read()
+            raw_lyrics = self.get_lyrics(self.lyrics_path)
         else:
             print(f"No lyrics file found at {self.lyrics_path}")
             return None
@@ -350,11 +298,11 @@ class LyricsAligner:
         self.transcription = self.transcribe_audio()
 
         print("Aligning lyrics...")
-        aligner = Lyrics(self.transcription)
-        aligner.create_lyric_slices(lyrics)
-        aligner.fix_alignment()
-        aligner.save_alignment(self.aligned_lyrics_path)
-        return aligner.slices
+        lyrics = Lyrics(self.transcription)
+        lyrics.create_lyric_slices(raw_lyrics)
+        aligned = self.fix_alignment(lyrics)
+        self.save_alignment(aligned, self.aligned_lyrics_path)
+        return aligned
 
     def process_audio_file(self):
         if not self.audio_file.exists():
@@ -432,11 +380,26 @@ class LyricsAligner:
             print(f"Error saving {path}")
             raise
 
+    def save_transcription(self, path: Path, transcription: dict):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(transcription, f, indent=2)
+            print(f"Saved transcription to {path}")
+
+    def load_transcription(self, path: Path) -> dict:
+        if not path.exists():
+            return None
+        with open(path, "r") as f:
+            return json.load(f)
+
     def transcribe_audio(self, model_size: str = "large") -> dict:
+        if result := self.load_transcription(self.transcription_path):
+            return result
+
         try:
             print("Loading model...")
             model = whisper.load_model(model_size)
-            print("Transcribing audio...")
+            print("Processing audio...")
 
             if not self.vocals_path.exists():
                 raise FileNotFoundError(f"Vocals file not found: {self.vocals_path}")
@@ -447,6 +410,7 @@ class LyricsAligner:
                 word_timestamps=True,
                 hallucination_silence_threshold=0.1,
             )
+            self.save_transcription(self.transcription_path, result)
             return result
         except Exception as e:
             print(f"Error transcribing audio: {e}")
@@ -457,6 +421,26 @@ class LyricsAligner:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    def fix_alignment(self):
-        aligner = Lyrics(self.transcription)
-        return aligner.fix_alignment()
+    def fix_alignment(self, lyrics: Lyrics, max_try_num: int = 10):
+        try_num = 0
+        while not lyrics.check_alignment() and try_num < max_try_num:
+            for i in range(len(lyrics) - 1):
+                if lyrics.check_time_overlap(lyrics[i], lyrics[i + 1]):
+                    gap = abs(lyrics[i + 1].start - lyrics[i].end)
+                    print(f"{lyrics[i].duration=} \t{lyrics[i + 1].duration=} \t{gap=}")
+                    lyrics[i].stretch(gap / 2)
+                    lyrics[i + 1].stretch(gap / 2, back=True)
+                    print(f"{lyrics[i].duration=} \t{lyrics[i + 1].duration=}")
+                #  FIXME: check for empty lines
+                if not lyrics.check_time_continuation(lyrics[i], lyrics[i + 1]):
+                    lyrics[i + 1].rebase(lyrics[i].end + 0.1)
+                    print(f"{str(lyrics[i])=} \t{str(lyrics[i + 1])=}")
+                    print(f"{lyrics[i].end=} \t{lyrics[i + 1].start=}")
+
+            try_num += 1
+        return lyrics
+
+    def save_alignment(self, aligned: Lyrics, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump([slice.to_dict() for slice in aligned], f, indent=2)

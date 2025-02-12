@@ -56,7 +56,7 @@ class TestLyricsSlice:
     def test_empty_slice(self):
         slice = LyricsSlice([])
         assert slice.words == []
-        assert slice.raw_text == None
+        assert slice.text == None
         assert slice.start == 0
         assert slice.end == 0
 
@@ -71,13 +71,13 @@ class TestLyricsSlice:
         slice = LyricsSlice(sample_words[:2], "custom text")
         assert len(slice.words) == 2
         assert str(slice) == "hello world"
-        assert slice.raw_text == "custom text"
+        assert slice.text == "custom text"
         assert slice.start == 0.0
         assert slice.end == 1.0
 
     def test_slice_with_custom_text(self, sample_words):
         slice = LyricsSlice(sample_words[:2], "custom text")
-        assert slice.raw_text == "custom text"
+        assert slice.text == "custom text"
 
     def test_slice_shift(self, sample_words):
         slice = LyricsSlice(sample_words[:2])
@@ -166,7 +166,7 @@ class TestLyrics:
         # Test exact match
         slice = lyrics.get_text_slice("Hello world", similarity_threshold=1.0)
         assert str(slice) == "hello world"
-        assert slice.raw_text == "Hello world"
+        assert slice.text == "Hello world"
         assert len(slice.words) == 2
 
         # Test partial match with threshold
@@ -176,17 +176,20 @@ class TestLyrics:
         assert slice.words[1].text == "world"
 
         # Test no match with threshold
-        slice = lyrics.get_text_slice("hello wrld", similarity_threshold=0.9)
-        assert len(slice.words) == 1
-        assert slice.words[0].text == "hello"
-
-        # Test no match with threshold
-        slice = lyrics.get_text_slice("helo wrld", similarity_threshold=0.9)
+        slice = lyrics.get_text_slice("helo wrld", similarity_threshold=1.0)
         assert len(slice.words) == 0
 
         # Test match after specific time
         slice = lyrics.get_text_slice("this is", similarity_threshold=1.0, after=1.0)
         assert len(slice.words) == 2
+        assert slice.words[0].text == "this"
+        assert slice.words[1].text == "is"
+
+        # Test match after specific time
+        slice = lyrics.get_text_slice(
+            "this is test", similarity_threshold=0.7, after=1.0
+        )
+        assert len(slice.words) == 3
         assert slice.words[0].text == "this"
         assert slice.words[1].text == "is"
 
@@ -212,9 +215,9 @@ class TestLyrics:
         lyrics.create_lyric_slices(lyrics_text)
 
         assert len(lyrics.slices) == 2
-        assert lyrics.slices[0].raw_text == "hello world"
+        assert lyrics.slices[0].text == "hello world"
         assert len(lyrics.slices[0].words) == 2
-        assert lyrics.slices[1].raw_text == "this is a test"
+        assert lyrics.slices[1].text == "this is a test"
         assert len(lyrics.slices[1].words) == 4
 
     def test_check_alignment(self, lyrics):

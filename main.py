@@ -64,27 +64,25 @@ class KaraokePlayer:
                 for i, slice in enumerate(aligned_lyrics):
                     if not slice.words:  # Skip empty slices
                         continue
-                    start = slice.start
-                    end = slice.end
-                    if start <= current_time <= end:
-                        curr_line = slice.raw_text
+                    if slice.start <= current_time <= slice.end:
+                        curr_line = slice.text
                         curr_idx = i
                         break
 
                 # Find previous and next lines
                 if curr_idx >= 0:
                     prev_line = (
-                        aligned_lyrics[curr_idx - 1].raw_text
-                        if aligned_lyrics[curr_idx - 1].raw_text
-                        else aligned_lyrics[curr_idx].raw_text
+                        aligned_lyrics[curr_idx - 1].text
+                        if aligned_lyrics[curr_idx - 1].text
+                        else aligned_lyrics[curr_idx].text
                     )
                     next_line = (
-                        aligned_lyrics[curr_idx + 1].raw_text
-                        if aligned_lyrics[curr_idx + 1].raw_text
-                        else aligned_lyrics[curr_idx].raw_text
+                        aligned_lyrics[curr_idx + 1].text
+                        if aligned_lyrics[curr_idx + 1].text
+                        else aligned_lyrics[curr_idx].text
                     )
                 # Clear screen and display lyrics
-                raise Exception()
+                # raise Exception()
                 print("\033[H\033[J", end="")  # Clear terminal
                 print(f"Time: {current_time:.1f}s")
                 print("\nLyrics:")
