@@ -20,7 +20,8 @@ class KaraokePlayer:
         """Process audio and get aligned lyrics using LyricsAligner."""
         if not force:
             # Try to load existing lyrics first
-            lyrics_data = self.aligner.get_lyrics()
+            lyrics_data = self.aligner.get_aligned_lyrics()
+
             if lyrics_data is not None:
                 return [LyricsSlice.from_dict(slice_data) for slice_data in lyrics_data]
 

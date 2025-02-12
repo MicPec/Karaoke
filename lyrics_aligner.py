@@ -12,23 +12,13 @@ from typing import TypeVar
 
 # =========================================
 # FILE_PATH = Path("/home/michal/DEV/Karaoke/rower.mp3")
-FILE_PATH = Path("/home/michal/DEV/Karaoke/youre_the_one_that_i_want.mp3")
+# FILE_PATH = Path("/home/michal/DEV/Karaoke/youre_the_one_that_i_want.mp3")
 # =========================================
 
-LYRICS_FILE_PATH = FILE_PATH.with_suffix(".txt")
+# LYRICS_FILE_PATH = FILE_PATH.with_suffix(".txt")
 
 CACHE_DIR = Path("cache")
 STRIP_CHARS = " ,.!?()[]\"'"
-
-
-def get_lyrics() -> str:
-    if LYRICS_FILE_PATH.exists():
-        with open(LYRICS_FILE_PATH, "r") as f:
-            lyrics = f.read()
-            lyrics = re.sub(r"[\{\[\(].*?[\}\]\)]", "", lyrics)
-            return lyrics
-    else:
-        return ""
 
 
 @dataclass
@@ -214,18 +204,26 @@ class Lyrics:
         search_sentence = " ".join([w.strip(STRIP_CHARS).lower() for w in text.split()])
         sentence_len = len(search_sentence.split())
         print(f"Searching for: {search_sentence}")
-        print(f"{len(self.words)=} \t{len(search_sentence)=}")
+        best_sentence = None
+        best_similarity = 0.0
+        # TODO: add window to search  and search entire as a fallback
         for pos in range(0, len(self.words) - sentence_len + 1):
             sentence = self.get_words_pos_slice(pos, pos + sentence_len)
-            print(f"  {sentence}", end="\n")
+
             similarity = difflib.SequenceMatcher(
                 None, search_sentence, str(sentence).lower()
             ).ratio()
-            print(f"    {similarity}")
-            if similarity >= similarity_threshold:
+
+            if similarity == 1:
                 return sentence
 
-    def create_lyric_slices(self, lyrics: str, *, similarity_threshold: float = 0.4):
+            if similarity > best_similarity:
+                best_sentence = sentence
+                best_similarity = similarity
+
+        return best_sentence
+
+    def create_lyric_slices(self, lyrics: str, *, similarity_threshold: float = 0.8):
         self.raw_lyrics = lyrics.splitlines()
         self.slices = []
         last_slice_end = 0.0
@@ -272,7 +270,7 @@ class Lyrics:
         return True
 
     def fix_alignment(
-        self, max_try: int = 100, min_gap: float = 0.1, max_stretch: float = 0.5
+        self, max_try: int = 100, min_gap: float = 0.1, max_stretch: float = 0.8
     ):
         # FIXME: this implementation is not working properly
         if not self.slices:
@@ -312,7 +310,7 @@ class LyricsAligner:
     def get_instr(self):
         return self.instr_path
 
-    def get_lyrics(self):
+    def get_aligned_lyrics(self):
         if self.aligned_lyrics_path.exists():
             print(f"Reading aligned lyrics from {self.aligned_lyrics_path}")
             with open(self.aligned_lyrics_path, "r") as f:
@@ -320,6 +318,18 @@ class LyricsAligner:
         else:
             print(f"No aligned lyrics file found at {self.aligned_lyrics_path}")
             return None
+
+    def get_lyrics(self, lyrics_path: Path) -> str:
+        if lyrics_path.exists():
+            with open(lyrics_path, "r") as f:
+                return self.prepare_lyrics(f.read())
+        else:
+            print(f"No lyrics file found at {lyrics_path}")
+            return None
+
+    def prepare_lyrics(self, lyrics: str = None) -> str:
+        lyrics = re.sub(r"[\{\[\(].*?[\}\]\)]", "", lyrics)
+        return lyrics
 
     def process_audio(self, overwrite: bool = False):
         if self.vocals_path.exists() and self.instr_path.exists() and not overwrite:
