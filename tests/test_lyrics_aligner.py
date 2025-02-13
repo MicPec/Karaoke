@@ -177,7 +177,7 @@ class TestLyrics:
 
         # Test no match with threshold
         slice = lyrics.get_text_slice("helo wrld", similarity_threshold=1.0)
-        assert len(slice.words) == 0
+        assert slice is None
 
         # Test match after specific time
         slice = lyrics.get_text_slice("this is", similarity_threshold=1.0, after=1.0)

@@ -78,7 +78,8 @@ class KaraokePlayer:
                     )
                     next_line = (
                         aligned_lyrics[curr_idx + 1].text
-                        if aligned_lyrics[curr_idx + 1].text
+                        if curr_idx + 1 < len(aligned_lyrics)
+                        and aligned_lyrics[curr_idx + 1].text
                         else aligned_lyrics[curr_idx].text
                     )
                 # Clear screen and display lyrics
@@ -142,8 +143,8 @@ def main():
 
     except KeyboardInterrupt:
         print("\nProgram stopped by user")
-    except Exception as e:
-        print(f"Error: {str(e)}")
+    # except Exception as e:
+    #     print(f"Error: {str(e)}")
 
 
 if __name__ == "__main__":

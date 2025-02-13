@@ -41,7 +41,7 @@ class LyricsSlice:
     def from_dict(cls, data: dict) -> LyricsSlice:
         return cls(
             words=[Word(w["text"], w["start"], w["end"]) for w in data["words"]],
-            text=data.get("raw_text", None),
+            text=data.get("text", None),
         )
 
     def __str__(self):
@@ -94,13 +94,20 @@ class LyricsSlice:
             return 0.0
         return self.words[-1].end
 
+    @property
+    def duration(self) -> float:
+        """Return the duration of the lyrics slice."""
+        if not self.words:
+            return 0.0
+        return self.end - self.start
+
     def to_dict(self) -> dict:
         """Convert LyricsSlice to dictionary format."""
         return {
             "words": [
                 {"text": w.text, "start": w.start, "end": w.end} for w in self.words
             ],
-            "raw_text": self.text,
+            "text": self.text,
         }
 
 
@@ -111,12 +118,9 @@ class Lyrics:
         self.words = []
         for i, seg in enumerate(transcription["segments"]):
             for word in transcription["segments"][i]["words"]:
-                if word["probability"] > 0.3:
-                    self.words.append(
-                        Word(
-                            word["word"].strip(STRIP_CHARS), word["start"], word["end"]
-                        )
-                    )
+                self.words.append(
+                    Word(word["word"].strip(STRIP_CHARS), word["start"], word["end"])
+                )
 
     def __repr__(self) -> str:
         return " ".join([word.text for word in self.words])
@@ -146,22 +150,27 @@ class Lyrics:
                 return word
         return None
 
+    def get_next_word(self, time: float) -> Word | None:
+        for word in self.words:
+            if word.start > time:
+                return word
+        return None
+
     def get_text_slice(
-        self, text: str, *, similarity_threshold: float, after: float = -1.0
-    ) -> LyricsSlice:
+        self, text: str, *, similarity_threshold: float, after_pos: int = -1
+    ) -> tuple[LyricsSlice, int]:
         search_sentence = " ".join([w.strip(STRIP_CHARS).lower() for w in text.split()])
         sentence_len = len(search_sentence.split())
         print(f"Searching for: {search_sentence}")
         best_sentence = None
         best_similarity = 0.0
 
-        start_idx = next(
-            (i for i, word in enumerate(self.words) if word.start >= after), None
-        )
-        if start_idx is None or start_idx + sentence_len > len(self.words):
-            return LyricsSlice([])
+        # start_idx = next((i for i, _ in enumerate(self.words) if i >= after_pos), 0)
+        start_idx = sum(len(s.words) for s in self.slices[:after_pos])
+        if start_idx + sentence_len > len(self.words):
+            return None
         try_number = 0
-        while try_number < 2:
+        while try_number < 3:
             for pos in range(start_idx, len(self.words) - sentence_len + 1):
                 sentence = self.get_words_pos_slice(pos, pos + sentence_len)
 
@@ -170,45 +179,58 @@ class Lyrics:
                 ).ratio()
 
                 if similarity == 1:
-                    return LyricsSlice(sentence.words, text)
+                    print("Found exact match!")
+                    return LyricsSlice(sentence.words, text), len(self.slices)
 
                 if similarity > best_similarity:
                     best_sentence = sentence
                     best_similarity = similarity
 
             if best_similarity >= similarity_threshold:
-                return LyricsSlice(best_sentence.words, text)
+                print(f"Found close match! {best_similarity=} {str(best_sentence)=}")
+
+                return LyricsSlice(best_sentence.words, text), len(self.slices)
             try_number += 1
-            start_idx = 0
+            best_similarity = 0.0
+            best_sentence = None
+            similarity_threshold -= 0.1
+            start_idx = 0  # search from the beginning as a fallback
 
-        return LyricsSlice([])
+        print("No match found.")
+        return None, -1
 
-    def create_lyric_slices(self, lyrics: str, *, similarity_threshold: float = 0.8):
+    def create_lyric_slices(self, lyrics: str, *, similarity_threshold: float = 0.9):
         self.raw_lyrics = lyrics.splitlines()
         self.slices = []
         last_slice_end = 0.0
         for line in self.raw_lyrics:
-            slice = self.get_text_slice(
-                line, after=last_slice_end, similarity_threshold=similarity_threshold
+            slice, pos = self.get_text_slice(
+                line,
+                after_pos=sum(len(i.words) for i in self.slices)
+                - 5,  # window for count of words mismatch
+                similarity_threshold=similarity_threshold,
             )
-            self.slices.append(slice)
-            last_slice_end = slice.end
+            if slice:
+                print(f"Slice {pos}: {str(slice)}")
+
+                if (
+                    len(self.slices) > 0
+                    and slice.start > self.slices[len(self.slices) - 1].end
+                ):
+                    print("Rebased slice")
+                    slice.rebase(
+                        self.get_next_word(self.slices[len(self.slices) - 1].end).end
+                        + 0.1
+                    )
+                self.slices.append(slice)
 
         return self.slices
 
     def check_time_overlap(self, slice1, slice2) -> bool:
-        if slice1.end > slice2.start and slice1.start < slice2.end:
-            return True
-        else:
-            return False
+        return slice1.end > slice2.start and slice1.start < slice2.end
 
     def check_time_continuation(self, slice1, slice2) -> bool:
-        # if not slice1.words or not slice2.words:
-        #     return True  # Consider empty slices as valid continuations
-        if slice1.end <= slice2.start:
-            return True
-        else:
-            return False
+        return slice1.end <= slice2.start
 
     def check_alignment(self):
         for i in range(len(self.slices) - 1):
@@ -219,23 +241,6 @@ class Lyrics:
                 print("Continuation problem:", self.slices[i], self.slices[i + 1])
                 return False
         return True
-
-    # def fix_alignment(
-    #     self, max_try: int = 100, min_gap: float = 0.1, max_stretch: float = 0.8
-    # ):
-    #     # FIXME: this implementation is not working properly
-    #     if not self.slices:
-    #         return self.slices
-
-    #     try_num = 0
-    #     while not self.check_alignment() and try_num < max_try:
-    #         try_num += 1
-    #         modified = False
-
-    #         # First pass: Fix major overlaps and gaps
-    #         for i in range(len(self.slices) - 1):
-    #             pass
-    #     return self.slices
 
 
 class LyricsAligner:
@@ -421,21 +426,27 @@ class LyricsAligner:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    def fix_alignment(self, lyrics: Lyrics, max_try_num: int = 10):
+    def fix_alignment(self, lyrics, max_try_num: int = 2):
+        """Fix timing issues in the lyrics alignment."""
+        if not lyrics.slices:
+            return lyrics
+
         try_num = 0
         while not lyrics.check_alignment() and try_num < max_try_num:
-            for i in range(len(lyrics) - 1):
-                if lyrics.check_time_overlap(lyrics[i], lyrics[i + 1]):
-                    gap = abs(lyrics[i + 1].start - lyrics[i].end)
-                    print(f"{lyrics[i].duration=} \t{lyrics[i + 1].duration=} \t{gap=}")
-                    lyrics[i].stretch(gap / 2)
-                    lyrics[i + 1].stretch(gap / 2, back=True)
-                    print(f"{lyrics[i].duration=} \t{lyrics[i + 1].duration=}")
-                #  FIXME: check for empty lines
+            print(f"\nAttempt {try_num + 1} to fix alignment")
+            for i in range(len(lyrics.slices) - 1):
+                if lyrics[i].duration < 0 or lyrics[i + 1].duration < 0:
+                    print(f"Warning: Negative duration detected!")
+                    print(
+                        f"Slice {i}: {str(lyrics[i])} (duration: {lyrics[i].duration})"
+                    )
+                    print(
+                        f"Slice {i+1}: {str(lyrics[i + 1])} (duration: {lyrics[i + 1].duration})"
+                    )
+
                 if not lyrics.check_time_continuation(lyrics[i], lyrics[i + 1]):
-                    lyrics[i + 1].rebase(lyrics[i].end + 0.1)
-                    print(f"{str(lyrics[i])=} \t{str(lyrics[i + 1])=}")
-                    print(f"{lyrics[i].end=} \t{lyrics[i + 1].start=}")
+                    # fix continuation
+                    pass
 
             try_num += 1
         return lyrics
