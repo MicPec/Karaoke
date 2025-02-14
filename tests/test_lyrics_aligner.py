@@ -95,10 +95,8 @@ class TestSegment:
         )
         # Split in the middle
         new_segment = segment.split(2)  # Split after "world"
-        assert len(new_segment[0].words) == 2
-        assert str(new_segment[0]) == "hello world"
-        assert len(new_segment[1].words) == 2
-        assert str(new_segment[1]) == "this is"
+        assert len(new_segment.words) == 2
+        assert str(new_segment) == "this is"
         assert len(segment.words) == 2
         assert str(segment) == "hello world"
 

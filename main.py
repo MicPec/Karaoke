@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 import time
 import threading
-from lyrics_aligner import LyricsAligner, Word, Segment, MatchType
+from lyrics_aligner import LyricsAligner, Word, Segment, MatchType, download_lyrics
 import simpleaudio as sa
 from pydub import AudioSegment
 from pydub.playback import play
@@ -10,23 +10,37 @@ from typing import List, Optional
 
 
 class KaraokePlayer:
-    def __init__(self, audio_file: str):
+    def __init__(
+        self,
+        audio_file: str,
+        song_title: Optional[str] = None,
+        song_author: Optional[str] = None,
+    ):
         self.audio_file = Path(audio_file)
         self.cache_dir = Path("cache") / self.audio_file.stem
         os.makedirs(self.cache_dir, exist_ok=True)
         self.aligner = LyricsAligner(self.audio_file)
+        self.song_title = song_title or self.audio_file.stem
+        self.song_author = song_author
 
     def process_audio(self, force: bool = False) -> list[Segment] | None:
         """Process audio and get aligned lyrics using LyricsAligner."""
+        if self.aligner.get_lyrics(self.aligner.lyrics_path) is None or force:
+            print("Downloading lyrics...")
+            lyrics = download_lyrics(self.song_title, self.song_author or "")
+            with open(self.aligner.lyrics_path, "w") as f:
+                f.write(lyrics)
+
         if not force:
             # Try to load existing lyrics first
-            lyrics_data = self.aligner.load_alignment()
+            lyrics_data = self.aligner.load_alignment(self.aligner.aligned_lyrics_path)
 
             if lyrics_data is not None:
                 return lyrics_data
 
         print("Processing audio and aligning lyrics...")
         lyrics_data = self.aligner.process_audio(overwrite=force)
+
         return lyrics_data
 
     def play_audio(self):
@@ -35,6 +49,7 @@ class KaraokePlayer:
         vocals = AudioSegment.from_file(self.aligner.get_vocals())
         instrumental = AudioSegment.from_file(self.aligner.get_instr())
 
+        vocals = vocals - 15
         # Mix vocals and instrumental
         mixed = vocals.overlay(instrumental)
 
@@ -76,11 +91,19 @@ def main():
         action="store_true",
         help="Force audio transcription even if it exists",
     )
+    parser.add_argument(
+        "--title",
+        help="Song title (if different from audio filename)",
+    )
+    parser.add_argument(
+        "--author",
+        help="Song author/artist name",
+    )
     args = parser.parse_args()
 
     try:
         # Initialize player and process audio
-        player = KaraokePlayer(args.audio)
+        player = KaraokePlayer(args.audio, args.title, args.author)
         aligned_lyrics = player.process_audio(force=args.force)
 
         if not aligned_lyrics:
@@ -90,11 +113,10 @@ def main():
         # Show lyrics preview
         print("\nAligned Lyrics Preview:")
         print("-" * 50)
-        for slice in aligned_lyrics:
-            if slice.words:
-                start = slice.words[0].start
-                end = slice.words[-1].end
-                print(f"[{start:.1f}s - {end:.1f}s] {slice}")
+        for segment in aligned_lyrics:
+            start = segment.start
+            end = segment.end
+            print(f"[{start:.1f}s - {end:.1f}s] {segment.text}")
 
         # Start karaoke mode
         print("\nStarting karaoke mode... (Press Ctrl+C to exit)")

@@ -10,12 +10,33 @@ import re
 from dataclasses import dataclass
 from typing import TypeVar
 from enum import Enum
+import lyricsgenius
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def download_lyrics(song_title: str, artist_name: str = "") -> str:
+    genius = lyricsgenius.Genius(os.getenv("GENIUS_API_KEY"))
+    song = genius.search_song(song_title, artist_name)
+    return song.lyrics
+
 
 CACHE_DIR = Path("cache")
 STRIP_CHARS = " ,.!?()[]/\\\"'"
 
 
-MatchType = Enum("MatchType", ["NONE", "DIRECT", "SIMILAR", "MISSING", "EXCESS"])
+MatchType = Enum(
+    "MatchType",
+    {
+        "NONE": "NONE",
+        "DIRECT": "DIRECT",
+        "SIMILAR": "SIMILAR",
+        "MISSING": "MISSING",
+        "EXCESS": "EXCESS",
+    },
+)
 
 
 @dataclass
@@ -41,7 +62,7 @@ class Segment:
     text: str
     words: list[Word]
     match_type: MatchType = MatchType.NONE
-    match_confidence: float | None = None
+    match_confidence: float = 0.0
 
     def __str__(self):
         return self.text
@@ -92,9 +113,9 @@ class Segment:
         self.words.pop(index)
         self.text = " ".join([word.text for word in self.words])
 
-    def split(self, index: int) -> list["Segment"]:
+    def split(self, index: int) -> Segment:
         if index == 0 or index >= len(self.words):
-            return [self]
+            return None
         new_segment = Segment(
             text=" ".join([word.text for word in self.words[index:]]),
             words=self.words[index:],
@@ -103,8 +124,7 @@ class Segment:
         )
         self.words = self.words[:index]
         self.text = " ".join([word.text for word in self.words])
-        result = [self, new_segment]
-        return result
+        return new_segment
 
     @property
     def raw(self):
@@ -132,6 +152,9 @@ class Segment:
         if not self.words:
             return 0.0
         return self.end - self.start
+
+
+Lyrics = TypeVar("Lyrics")
 
 
 class Lyrics:
@@ -162,7 +185,7 @@ class Lyrics:
                         text=word["word"].strip(STRIP_CHARS),
                         start=word["start"],
                         end=word["end"],
-                        probability=word.get("probability", 1.0),
+                        probability=word.get("probability", 0.5),
                     )
                     for word in seg["words"]
                 ],
@@ -170,6 +193,9 @@ class Lyrics:
             )
             segments.append(segment)
         return segments
+
+    def clean_str(self, text: str) -> str:
+        return re.sub(r"[\{\[\(].*?[\}\]\)]", "", text).strip(STRIP_CHARS).lower()
 
     def get_segment_by_time(self, time: float) -> Segment | None:
         for segment in self.segments:
@@ -194,62 +220,72 @@ class Lyrics:
         return None
 
     def split_segment(self, segment: Segment, *, start: int, end: int) -> list[Segment]:
-        if start == 0 and end == len(segment.words):
+        if start == 0 and end >= len(segment.words):
             return [segment]
         if start == 0:
-            segments = segment.split(end)
-            self.segments.insert(self.segments.index(segment) + 1, segments[1])
-            return segments
+            new_segment = segment.split(end)
+            if new_segment:
+                self.segments.insert(self.segments.index(segment) + 1, new_segment)
+                return [segment, new_segment]
+            return [segment]
         if end >= len(segment.words):
-            segments = segment.split(start)
-            self.segments.insert(self.segments.index(segment) + 1, segments[1])
-            return segments
-        else:
+            new_segment = segment.split(start)
+            if new_segment:
+                self.segments.insert(self.segments.index(segment) + 1, new_segment)
+                return [segment, new_segment]
+            return [segment]
+        if start > 0 and end < len(segment.words):
             result = []
-            segments = segment.split(start)
-            self.segments.insert(self.segments.index(segment) + 1, segments[1])
-            if segments:
-                result.extend(segments)
-                segment = segments[1]
-                segments = segment.split(end - start)
-                self.segments.insert(self.segments.index(segment) + 1, segments[1])
-                if segments:
-                    result.append(segments[1])
-            return result
+            new_segment = segment.split(start)
+            if new_segment:
+                self.segments.insert(self.segments.index(segment) + 1, new_segment)
+                result.extend([segment, new_segment])
+                new_segment2 = new_segment.split(end - start)
+                if new_segment2:
+                    result.append(new_segment2)
+                    self.segments.insert(
+                        self.segments.index(new_segment) + 1, new_segment2
+                    )
+        return result
 
     @property
     def words(self):
         return [w for segment in self.segments for w in segment.words]
 
     def find_best_match(
-        self, search_text: str, *, similarity_threshold: float
+        self, search_text: str, *, similarity_threshold: float, max_try_num: int = 2
     ) -> Segment | None:
-        # search_words = [w.lower() for w in search_text.split() if w.strip(STRIP_CHARS)]
+        st = self.clean_str(search_text)
         best_match_score = 0.0
         best_matched_segment = None
+        try_num = 0
+        while try_num < max_try_num:
+            for segment in self.segments:
+                if segment.match_type not in (MatchType.NONE, MatchType.DIRECT):
+                    continue
+                similarity = difflib.SequenceMatcher(None, st, segment.raw).ratio()
+                if similarity == 1.0:
+                    segment.text = search_text
+                    segment.match_type = MatchType.DIRECT
+                    segment.match_confidence = 1.0
+                    return segment
+                if similarity > best_match_score:
+                    best_match_score = similarity
+                    best_matched_segment = segment
 
-        for segment in self.segments:
-            if segment.match_type != MatchType.NONE:
-                continue
-            similarity = difflib.SequenceMatcher(None, search_text, segment.raw).ratio()
-            if similarity == 1.0:
-                segment.match_type = MatchType.DIRECT
-                segment.match_confidence = 1.0
-                return segment
-            if similarity > best_match_score:
-                best_match_score = similarity
-                best_matched_segment = segment
-
-        if best_match_score >= similarity_threshold:
-            best_matched_segment.match_type = MatchType.SIMILAR
-            best_matched_segment.match_confidence = best_match_score
-            return best_matched_segment
+            if best_match_score >= similarity_threshold:
+                if best_matched_segment.match_confidence < best_match_score:
+                    best_matched_segment.text = search_text
+                    best_matched_segment.match_type = MatchType.SIMILAR
+                    best_matched_segment.match_confidence = best_match_score
+                return best_matched_segment
+            try_num += 1
+            similarity_threshold -= 0.1
         return None
 
     def split_seg_by_text(
         self, segment: Segment, text: str, *, similarity_threshold: float
     ) -> Segment | None:
-        # Compare word texts instead of Word objects
         search_text = text.split()
 
         best_score = 0
@@ -264,11 +300,9 @@ class Lyrics:
                 best_score = similarity
                 best_match = pos
 
-        # Check if the similarity ratio meets the threshold
         if best_match >= 0 and best_score >= similarity_threshold:
             start = best_match
             end = best_match + len(search_text)
-            # matched_words = segment.words[start:end]
             return self.split_segment(segment, start=start, end=end)
 
         return None
@@ -290,8 +324,8 @@ class Lyrics:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Lyrics":
-        cls.segments = [
+    def from_dict(cls, data: dict) -> Lyrics:
+        segments = [
             Segment(
                 text=segment["text"],
                 words=[
@@ -303,7 +337,6 @@ class Lyrics:
             )
             for segment in data["segments"]
         ]
-        return cls
 
 
 class LyricsAligner:
@@ -347,7 +380,7 @@ class LyricsAligner:
         return aligned
 
     def align(self, lyrics: Lyrics, raw_lyrics: str, *, max_try_num: int = 2) -> Lyrics:
-        raw_lyrics = [self.prepare_lyrics(line) for line in raw_lyrics.splitlines()]
+        raw_lyrics = [line.strip() for line in raw_lyrics.splitlines()]
         try_num = 0
         completed = False
 
@@ -355,7 +388,9 @@ class LyricsAligner:
             print(f"\nAttempt {try_num + 1} to fix alignment")
             # pass 1: find best matches
             for line in raw_lyrics:
-                segment = lyrics.find_best_match(line, similarity_threshold=0.9)
+                segment = lyrics.find_best_match(
+                    line, similarity_threshold=0.9, max_try_num=3
+                )
                 if not segment:
                     print(f"Couldn't find match for {line}")
                     continue
@@ -370,7 +405,6 @@ class LyricsAligner:
                         result = lyrics.split_seg_by_text(
                             segment, line, similarity_threshold=0.9
                         )
-                        print(f"{result=}")
 
             try_num += 1
         return lyrics
@@ -522,4 +556,10 @@ class LyricsAligner:
     def save_alignment(self, aligned: Lyrics, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
-            json.dump(aligned.to_dict(), f, indent=2)
+            json.dump(aligned.to_dict(), f, indent=1)
+
+    def load_alignment(self, path: Path) -> Lyrics:
+        if not path.exists():
+            return None
+        with open(path, "r") as f:
+            return Lyrics.from_dict(json.load(f))
