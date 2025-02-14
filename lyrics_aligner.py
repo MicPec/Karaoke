@@ -9,10 +9,13 @@ import json
 import re
 from dataclasses import dataclass
 from typing import TypeVar
-
+from enum import Enum
 
 CACHE_DIR = Path("cache")
-STRIP_CHARS = " ,.!?()[]\"'"
+STRIP_CHARS = " ,.!?()[]/\\\"'"
+
+
+MatchType = Enum("MatchType", ["NONE", "DIRECT", "SIMILAR", "MISSING", "EXCESS"])
 
 
 @dataclass
@@ -20,6 +23,7 @@ class Word:
     text: str
     start: float
     end: float
+    probability: float = 1.0
 
     def __str__(self):
         return self.text
@@ -29,28 +33,18 @@ class Word:
         return self.end - self.start
 
 
-LyricsSlice = TypeVar("LyricsSlice")
+Segment = TypeVar("Segment")
 
 
 @dataclass
-class LyricsSlice:
+class Segment:
+    text: str
     words: list[Word]
-    text: str | None = None
-
-    @classmethod
-    def from_dict(cls, data: dict) -> LyricsSlice:
-        return cls(
-            words=[Word(w["text"], w["start"], w["end"]) for w in data["words"]],
-            text=data.get("text", None),
-        )
+    match_type: MatchType = MatchType.NONE
+    match_confidence: float | None = None
 
     def __str__(self):
-        return " ".join(word.text.strip() for word in self.words)
-
-    # def append(self, slice: LyricsSlice, rebase: bool = True) -> None:
-    #     if rebase:
-    #         slice.rebase(self.end)
-    #     self.words += slice.words
+        return self.text
 
     def stretch(self, value: float, backward: bool = False):
         duration = self.words[-1].end - self.words[0].start
@@ -82,6 +76,44 @@ class LyricsSlice:
             word.start += diff
             word.end += diff
 
+    def insert_word(self, word: Word, index: int):
+        word.start = self.start + self.duration / len(self.words) * index
+        word.end = self.start + self.duration / len(self.words) * (index + 1)
+        for w in self.words[index + 1 :]:
+            w.start += self.duration / len(self.words)
+            w.end += self.duration / len(self.words)
+        self.words.insert(index, word)
+        self.text = " ".join([word.text for word in self.words])
+
+    def remove_word(self, index: int):
+        for w in self.words[index + 1 :]:
+            w.start -= self.duration / len(self.words)
+            w.end -= self.duration / len(self.words)
+        self.words.pop(index)
+        self.text = " ".join([word.text for word in self.words])
+
+    def split(self, index: int) -> list["Segment"]:
+        if index == 0 or index >= len(self.words):
+            return [self]
+        new_segment = Segment(
+            text=" ".join([word.text for word in self.words[index:]]),
+            words=self.words[index:],
+            match_type=self.match_type,
+            match_confidence=self.match_confidence,
+        )
+        self.words = self.words[:index]
+        self.text = " ".join([word.text for word in self.words])
+        result = [self, new_segment]
+        return result
+
+    @property
+    def raw(self):
+        return " ".join([word.text.strip(STRIP_CHARS).lower() for word in self.words])
+
+    @property
+    def words_count(self):
+        return len(self.words)
+
     @property
     def start(self):
         if not self.words:
@@ -101,153 +133,183 @@ class LyricsSlice:
             return 0.0
         return self.end - self.start
 
-    def to_dict(self) -> dict:
-        """Convert LyricsSlice to dictionary format."""
-        return {
-            "words": [
-                {"text": w.text, "start": w.start, "end": w.end} for w in self.words
-            ],
-            "text": self.text,
-        }
-
 
 class Lyrics:
     def __init__(self, transcription: dict) -> None:
-        self.raw_lyrics: list | None = None
-        self.slices: list[LyricsSlice] = []
-        self.words = []
-        for i, seg in enumerate(transcription["segments"]):
-            for word in transcription["segments"][i]["words"]:
-                self.words.append(
-                    Word(word["word"].strip(STRIP_CHARS), word["start"], word["end"])
-                )
+        self.transcription = transcription
+        self.segments: list[Segment] = []
+        self.segments = self._prepare_transcription()
 
     def __repr__(self) -> str:
-        return " ".join([word.text for word in self.words])
+        return f"Lyrics({self.segments})"
 
     def __str__(self) -> str:
-        return self.__repr__()
+        return "\n".join([str(segment) for segment in self.segments])
 
     def __len__(self) -> int:
-        return len(self.slices)
+        return len(self.segments)
 
-    def __getitem__(self, index: int) -> LyricsSlice:
-        return self.slices[index]
+    def __getitem__(self, index: int) -> Segment:
+        return self.segments[index]
 
-    def get_time_slice(self, start: float, end: float) -> LyricsSlice:
-        result = [
-            word for word in self.words if word.start >= start and word.end <= end
-        ]
-        return LyricsSlice(result)
-
-    def get_words_pos_slice(self, start: int, end: int) -> LyricsSlice:
-        result = self.words[start:end]
-        return LyricsSlice(result)
-
-    def get_word_at_time(self, time: float) -> Word:
-        for word in self.words:
-            if word.start <= time <= word.end:
-                return word
-        return None
-
-    def get_next_word(self, time: float) -> Word | None:
-        for word in self.words:
-            if word.start > time:
-                return word
-        return None
-
-    def get_text_slice(
-        self, text: str, *, similarity_threshold: float, after_pos: int = -1
-    ) -> tuple[LyricsSlice, int]:
-        search_sentence = " ".join([w.strip(STRIP_CHARS).lower() for w in text.split()])
-        sentence_len = len(search_sentence.split())
-        print(f"Searching for: {search_sentence}")
-        best_sentence = None
-        best_similarity = 0.0
-
-        # start_idx = next((i for i, _ in enumerate(self.words) if i >= after_pos), 0)
-        start_idx = sum(len(s.words) for s in self.slices[:after_pos])
-        if start_idx + sentence_len > len(self.words):
-            return None
-        try_number = 0
-        while try_number < 3:
-            for pos in range(start_idx, len(self.words) - sentence_len + 1):
-                sentence = self.get_words_pos_slice(pos, pos + sentence_len)
-
-                similarity = difflib.SequenceMatcher(
-                    None, search_sentence, str(sentence).lower()
-                ).ratio()
-
-                if similarity == 1:
-                    print("Found exact match!")
-                    return LyricsSlice(sentence.words, text), len(self.slices)
-
-                if similarity > best_similarity:
-                    best_sentence = sentence
-                    best_similarity = similarity
-
-            if best_similarity >= similarity_threshold:
-                print(f"Found close match! {best_similarity=} {str(best_sentence)=}")
-
-                return LyricsSlice(best_sentence.words, text), len(self.slices)
-            try_number += 1
-            best_similarity = 0.0
-            best_sentence = None
-            similarity_threshold -= 0.1
-            start_idx = 0  # search from the beginning as a fallback
-
-        print("No match found.")
-        return None, -1
-
-    def create_lyric_slices(self, lyrics: str, *, similarity_threshold: float = 0.9):
-        self.raw_lyrics = lyrics.splitlines()
-        self.slices = []
-        last_slice_end = 0.0
-        for line in self.raw_lyrics:
-            slice, pos = self.get_text_slice(
-                line,
-                after_pos=sum(len(i.words) for i in self.slices)
-                - 5,  # window for count of words mismatch
-                similarity_threshold=similarity_threshold,
-            )
-            if slice:
-                print(f"Slice {pos}: {str(slice)}")
-
-                if (
-                    len(self.slices) > 0
-                    and slice.start > self.slices[len(self.slices) - 1].end
-                ):
-                    print("Rebased slice")
-                    slice.rebase(
-                        self.get_next_word(self.slices[len(self.slices) - 1].end).end
-                        + 0.1
+    def _prepare_transcription(self):
+        segments = []
+        for seg in self.transcription["segments"]:
+            segment = Segment(
+                text=seg["text"].strip(STRIP_CHARS),
+                words=[
+                    Word(
+                        text=word["word"].strip(STRIP_CHARS),
+                        start=word["start"],
+                        end=word["end"],
+                        probability=word.get("probability", 1.0),
                     )
-                self.slices.append(slice)
+                    for word in seg["words"]
+                ],
+                match_type=MatchType.NONE,
+            )
+            segments.append(segment)
+        return segments
 
-        return self.slices
+    def get_segment_by_time(self, time: float) -> Segment | None:
+        for segment in self.segments:
+            if segment.start <= time <= segment.end:
+                return segment
+        return None
 
-    def check_time_overlap(self, slice1, slice2) -> bool:
-        return slice1.end > slice2.start and slice1.start < slice2.end
+    def get_word_by_time(self, time: float) -> Word | None:
+        for segment in self.segments:
+            for word in segment.words:
+                if word.start <= time <= word.end:
+                    return word
+        return None
 
-    def check_time_continuation(self, slice1, slice2) -> bool:
-        return slice1.end <= slice2.start
+    def get_word_by_pos(self, pos: int) -> Word | None:
+        curr_pos = 0
+        for segment in self.segments:
+            for word in segment.words:
+                if curr_pos == pos:
+                    return word
+                curr_pos += 1
+        return None
 
-    def check_alignment(self):
-        for i in range(len(self.slices) - 1):
-            if self.check_time_overlap(self.slices[i], self.slices[i + 1]):
-                print("Overlap detected:", self.slices[i], self.slices[i + 1])
-                return False
-            if not self.check_time_continuation(self.slices[i], self.slices[i + 1]):
-                print("Continuation problem:", self.slices[i], self.slices[i + 1])
-                return False
-        return True
+    def split_segment(self, segment: Segment, *, start: int, end: int) -> list[Segment]:
+        if start == 0 and end == len(segment.words):
+            return [segment]
+        if start == 0:
+            segments = segment.split(end)
+            self.segments.insert(self.segments.index(segment) + 1, segments[1])
+            return segments
+        if end >= len(segment.words):
+            segments = segment.split(start)
+            self.segments.insert(self.segments.index(segment) + 1, segments[1])
+            return segments
+        else:
+            result = []
+            segments = segment.split(start)
+            self.segments.insert(self.segments.index(segment) + 1, segments[1])
+            if segments:
+                result.extend(segments)
+                segment = segments[1]
+                segments = segment.split(end - start)
+                self.segments.insert(self.segments.index(segment) + 1, segments[1])
+                if segments:
+                    result.append(segments[1])
+            return result
+
+    @property
+    def words(self):
+        return [w for segment in self.segments for w in segment.words]
+
+    def find_best_match(
+        self, search_text: str, *, similarity_threshold: float
+    ) -> Segment | None:
+        # search_words = [w.lower() for w in search_text.split() if w.strip(STRIP_CHARS)]
+        best_match_score = 0.0
+        best_matched_segment = None
+
+        for segment in self.segments:
+            if segment.match_type != MatchType.NONE:
+                continue
+            similarity = difflib.SequenceMatcher(None, search_text, segment.raw).ratio()
+            if similarity == 1.0:
+                segment.match_type = MatchType.DIRECT
+                segment.match_confidence = 1.0
+                return segment
+            if similarity > best_match_score:
+                best_match_score = similarity
+                best_matched_segment = segment
+
+        if best_match_score >= similarity_threshold:
+            best_matched_segment.match_type = MatchType.SIMILAR
+            best_matched_segment.match_confidence = best_match_score
+            return best_matched_segment
+        return None
+
+    def split_seg_by_text(
+        self, segment: Segment, text: str, *, similarity_threshold: float
+    ) -> Segment | None:
+        # Compare word texts instead of Word objects
+        search_text = text.split()
+
+        best_score = 0
+        best_match = -1
+
+        for pos in range(len(segment.words) - len(text.split()) + 1):
+            subtext = " ".join(
+                [segment.words[pos + i].text for i in range(len(search_text))]
+            )
+            similarity = difflib.SequenceMatcher(None, subtext, text).ratio()
+            if similarity > best_score:
+                best_score = similarity
+                best_match = pos
+
+        # Check if the similarity ratio meets the threshold
+        if best_match >= 0 and best_score >= similarity_threshold:
+            start = best_match
+            end = best_match + len(search_text)
+            # matched_words = segment.words[start:end]
+            return self.split_segment(segment, start=start, end=end)
+
+        return None
+
+    def to_dict(self) -> dict:
+        return {
+            "segments": [
+                {
+                    "text": segment.text,
+                    "words": [
+                        {"text": w.text, "start": w.start, "end": w.end}
+                        for w in segment.words
+                    ],
+                    "match_type": segment.match_type.value,
+                    "match_confidence": segment.match_confidence,
+                }
+                for segment in self.segments
+            ]
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Lyrics":
+        cls.segments = [
+            Segment(
+                text=segment["text"],
+                words=[
+                    Word(text=word["text"], start=word["start"], end=word["end"])
+                    for word in segment["words"]
+                ],
+                match_type=MatchType(segment["match_type"]),
+                match_confidence=segment["match_confidence"],
+            )
+            for segment in data["segments"]
+        ]
+        return cls
 
 
 class LyricsAligner:
     def __init__(self, audio_path: Path) -> None:
         self.audio_file = audio_path
         self.cache_dir = CACHE_DIR / self.audio_file.stem
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.vocals_path = self.cache_dir / f"{self.audio_file.stem}.vocals.mp3"
         self.instr_path = self.cache_dir / f"{self.audio_file.stem}.instr.mp3"
         self.lyrics_path = self.cache_dir / f"{self.audio_file.stem}.lyrics.txt"
@@ -258,6 +320,60 @@ class LyricsAligner:
             self.cache_dir / f"{self.audio_file.stem}.aligned_lyrics.json"
         )
         self.transcription = None
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def process_audio(self, overwrite: bool = False):
+        if self.vocals_path.exists() and self.instr_path.exists() and not overwrite:
+            print("Audio already processed.")
+        else:
+            self.process_audio_file()
+
+        raw_lyrics = ""
+        if self.lyrics_path.exists():
+            raw_lyrics = self.get_lyrics(self.lyrics_path)
+        else:
+            print(f"No lyrics file found at {self.lyrics_path}")
+            # TODO: download lyrics
+            return None
+
+        print("Transcribing audio...")
+        self.transcription = self.transcribe_audio()
+
+        print("Aligning lyrics...")
+        lyrics = Lyrics(self.transcription)
+        # lyrics.create_lyric_slices(raw_lyrics)
+        aligned = self.align(lyrics, raw_lyrics)
+        self.save_alignment(aligned, self.aligned_lyrics_path)
+        return aligned
+
+    def align(self, lyrics: Lyrics, raw_lyrics: str, *, max_try_num: int = 2) -> Lyrics:
+        raw_lyrics = [self.prepare_lyrics(line) for line in raw_lyrics.splitlines()]
+        try_num = 0
+        completed = False
+
+        while not completed and try_num < max_try_num:
+            print(f"\nAttempt {try_num + 1} to fix alignment")
+            # pass 1: find best matches
+            for line in raw_lyrics:
+                segment = lyrics.find_best_match(line, similarity_threshold=0.9)
+                if not segment:
+                    print(f"Couldn't find match for {line}")
+                    continue
+                print(f"Matched {line} to {segment}")
+
+            # pass 2: process segments where there's no match
+            for segment in lyrics.segments:
+                print(segment)
+                if segment.match_type not in (MatchType.DIRECT, MatchType.SIMILAR):
+                    print(f"Processing segment {segment}")
+                    for line in raw_lyrics:
+                        result = lyrics.split_seg_by_text(
+                            segment, line, similarity_threshold=0.9
+                        )
+                        print(f"{result=}")
+
+            try_num += 1
+        return lyrics
 
     def get_vocals(self):
         return self.vocals_path
@@ -283,31 +399,8 @@ class LyricsAligner:
             return None
 
     def prepare_lyrics(self, lyrics: str = None) -> str:
-        lyrics = re.sub(r"[\{\[\(].*?[\}\]\)]", "", lyrics)
+        lyrics = re.sub(r"[\{\[\(].*?[\}\]\)]", "", lyrics).strip(STRIP_CHARS).lower()
         return lyrics
-
-    def process_audio(self, overwrite: bool = False):
-        if self.vocals_path.exists() and self.instr_path.exists() and not overwrite:
-            print("Audio already processed.")
-        else:
-            self.process_audio_file()
-
-        raw_lyrics = ""
-        if self.lyrics_path.exists():
-            raw_lyrics = self.get_lyrics(self.lyrics_path)
-        else:
-            print(f"No lyrics file found at {self.lyrics_path}")
-            return None
-
-        print("Transcribing audio...")
-        self.transcription = self.transcribe_audio()
-
-        print("Aligning lyrics...")
-        lyrics = Lyrics(self.transcription)
-        lyrics.create_lyric_slices(raw_lyrics)
-        aligned = self.fix_alignment(lyrics)
-        self.save_alignment(aligned, self.aligned_lyrics_path)
-        return aligned
 
     def process_audio_file(self):
         if not self.audio_file.exists():
@@ -426,32 +519,7 @@ class LyricsAligner:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    def fix_alignment(self, lyrics, max_try_num: int = 2):
-        """Fix timing issues in the lyrics alignment."""
-        if not lyrics.slices:
-            return lyrics
-
-        try_num = 0
-        while not lyrics.check_alignment() and try_num < max_try_num:
-            print(f"\nAttempt {try_num + 1} to fix alignment")
-            for i in range(len(lyrics.slices) - 1):
-                if lyrics[i].duration < 0 or lyrics[i + 1].duration < 0:
-                    print(f"Warning: Negative duration detected!")
-                    print(
-                        f"Slice {i}: {str(lyrics[i])} (duration: {lyrics[i].duration})"
-                    )
-                    print(
-                        f"Slice {i+1}: {str(lyrics[i + 1])} (duration: {lyrics[i + 1].duration})"
-                    )
-
-                if not lyrics.check_time_continuation(lyrics[i], lyrics[i + 1]):
-                    # fix continuation
-                    pass
-
-            try_num += 1
-        return lyrics
-
     def save_alignment(self, aligned: Lyrics, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
-            json.dump([slice.to_dict() for slice in aligned], f, indent=2)
+            json.dump(aligned.to_dict(), f, indent=2)
