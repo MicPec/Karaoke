@@ -9,7 +9,6 @@ dependencies = [
     "lyricsgenius>=3.2.0",
     "openai-whisper>=20231117",
     "pydub>=0.25.1",
-    "pytest>=8.3.4",
     "python-dotenv>=1.0.1",
     "rich>=13.9.4",
     "simpleaudio>=1.0.4",
@@ -20,3 +19,10 @@ dependencies = [
 [tool.ruff]
 extend-include = ["*.ipynb"]
 extend-exclude = ["*.ipynb_checkpoints"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.9.6",
+]
