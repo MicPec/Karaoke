@@ -131,6 +131,9 @@ class TestLyrics:
         print([str(segment) for segment in lyrics.segments])
         assert len(segments) == 3
         assert len(lyrics.segments) == original_len + 2
+        assert segments[0].text == "hello world"
+        assert segments[1].text == "this is a"
+        assert segments[2].text == "test"
         assert lyrics.segments[0].text == "hello world"
         assert lyrics.segments[1].text == "this is a"
         assert lyrics.segments[2].text == "test"
@@ -163,7 +166,7 @@ class TestLyrics:
         assert lyrics.segments[4].text == "test"
 
         # Test no split case (when start=0 and end=len)
-        no_split = lyrics.split_segment(segments[0], start=0, end=1)
+        no_split = lyrics.split_segment(segments[0], start=0, end=2)
         assert len(no_split) == 1
         assert no_split[0].text == "this"
         assert len(lyrics.segments) == original_len + 2 + 1 + 1

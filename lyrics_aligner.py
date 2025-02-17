@@ -1,17 +1,18 @@
-import torch
-from demucs.pretrained import get_model
-from demucs.apply import apply_model
-import torchaudio
-from pathlib import Path
-import whisper
 import difflib
 import json
+import os
 import re
 from dataclasses import dataclass
-from typing import TypeVar
 from enum import Enum
+from pathlib import Path
+from typing import TypeVar
+
 import lyricsgenius
-import os
+import torch
+import torchaudio
+import whisper
+from demucs.apply import apply_model
+from demucs.pretrained import get_model
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -33,6 +34,8 @@ MatchType = Enum(
         "NONE": "NONE",
         "DIRECT": "DIRECT",
         "SIMILAR": "SIMILAR",
+        "JOIN": "JOIN",
+        "PARTIAL": "PARTIAL",
         "MISSING": "MISSING",
         "EXCESS": "EXCESS",
     },
@@ -74,16 +77,10 @@ class Segment:
 
         for word in self.words:
             if not backward:
-                word.start = (
-                    self.words[0].start + (word.start - self.words[0].start) * scale
-                )
-                word.end = (
-                    self.words[0].start + (word.end - self.words[0].start) * scale
-                )
+                word.start = self.words[0].start + (word.start - self.words[0].start) * scale
+                word.end = self.words[0].start + (word.end - self.words[0].start) * scale
             else:
-                word.start = (
-                    self.words[-1].end - (self.words[-1].end - word.start) * scale
-                )
+                word.start = self.words[-1].end - (self.words[-1].end - word.start) * scale
                 word.end = self.words[-1].end - (self.words[-1].end - word.end) * scale
 
     def shift(self, value: float):
@@ -119,12 +116,23 @@ class Segment:
         new_segment = Segment(
             text=" ".join([word.text for word in self.words[index:]]),
             words=self.words[index:],
-            match_type=self.match_type,
+            match_type=MatchType.PARTIAL,
             match_confidence=self.match_confidence,
         )
         self.words = self.words[:index]
         self.text = " ".join([word.text for word in self.words])
         return new_segment
+
+    def join(self, other: Segment, *, rebase_time: float = 0.0):
+        if rebase_time != 0.0:
+            other.rebase(rebase_time)
+        if self.end > other.start:
+            raise ValueError("Cannot join segments that overlap")
+            # other.rebase(self.end)
+        self.words.extend(other.words)
+        self.match_type = MatchType.JOIN
+        self.match_confidence = max(self.match_confidence, other.match_confidence)
+        self.text = " ".join([word.text for word in self.words])
 
     @property
     def raw(self):
@@ -243,25 +251,21 @@ class Lyrics:
                 new_segment2 = new_segment.split(end - start)
                 if new_segment2:
                     result.append(new_segment2)
-                    self.segments.insert(
-                        self.segments.index(new_segment) + 1, new_segment2
-                    )
+                    self.segments.insert(self.segments.index(new_segment) + 1, new_segment2)
         return result
 
     @property
     def words(self):
         return [w for segment in self.segments for w in segment.words]
 
-    def find_best_match(
-        self, search_text: str, *, similarity_threshold: float, max_try_num: int = 2
-    ) -> Segment | None:
+    def find_best_match(self, search_text: str, *, similarity_threshold: float, max_try_num: int = 2) -> Segment | None:
         st = self.clean_str(search_text)
         best_match_score = 0.0
         best_matched_segment = None
         try_num = 0
         while try_num < max_try_num:
             for segment in self.segments:
-                if segment.match_type not in (MatchType.NONE, MatchType.DIRECT):
+                if segment.match_type in (MatchType.DIRECT,):
                     continue
                 similarity = difflib.SequenceMatcher(None, st, segment.raw).ratio()
                 if similarity == 1.0:
@@ -283,18 +287,14 @@ class Lyrics:
             similarity_threshold -= 0.1
         return None
 
-    def split_seg_by_text(
-        self, segment: Segment, text: str, *, similarity_threshold: float
-    ) -> Segment | None:
+    def split_seg_by_text(self, segment: Segment, text: str, *, similarity_threshold: float) -> Segment | None:
         search_text = text.split()
 
         best_score = 0
         best_match = -1
 
         for pos in range(len(segment.words) - len(text.split()) + 1):
-            subtext = " ".join(
-                [segment.words[pos + i].text for i in range(len(search_text))]
-            )
+            subtext = " ".join([segment.words[pos + i].text for i in range(len(search_text))])
             similarity = difflib.SequenceMatcher(None, subtext, text).ratio()
             if similarity > best_score:
                 best_score = similarity
@@ -307,15 +307,23 @@ class Lyrics:
 
         return None
 
+    def verify_next_segment(self, segment: Segment, text: str, *, similarity_threshold: float) -> Segment | None:
+        pos = self.segments.index(segment)
+        if pos < len(self.segments) - 1:
+            joined_text = " ".join([segment.text, self.segments[pos + 1].text])
+            similarity = difflib.SequenceMatcher(None, joined_text, text).ratio()
+            if similarity >= similarity_threshold:
+                result = segment.join(self.segments[pos + 1])
+                self.segments.remove(self.segments[pos + 1])
+                return result
+        return None
+
     def to_dict(self) -> dict:
         return {
             "segments": [
                 {
                     "text": segment.text,
-                    "words": [
-                        {"text": w.text, "start": w.start, "end": w.end}
-                        for w in segment.words
-                    ],
+                    "words": [{"text": w.text, "start": w.start, "end": w.end} for w in segment.words],
                     "match_type": segment.match_type.value,
                     "match_confidence": segment.match_confidence,
                 }
@@ -328,10 +336,7 @@ class Lyrics:
         segments = [
             Segment(
                 text=segment["text"],
-                words=[
-                    Word(text=word["text"], start=word["start"], end=word["end"])
-                    for word in segment["words"]
-                ],
+                words=[Word(text=word["text"], start=word["start"], end=word["end"]) for word in segment["words"]],
                 match_type=MatchType(segment["match_type"]),
                 match_confidence=segment["match_confidence"],
             )
@@ -346,12 +351,8 @@ class LyricsAligner:
         self.vocals_path = self.cache_dir / f"{self.audio_file.stem}.vocals.mp3"
         self.instr_path = self.cache_dir / f"{self.audio_file.stem}.instr.mp3"
         self.lyrics_path = self.cache_dir / f"{self.audio_file.stem}.lyrics.txt"
-        self.transcription_path = (
-            self.cache_dir / f"{self.audio_file.stem}.transcription.json"
-        )
-        self.aligned_lyrics_path = (
-            self.cache_dir / f"{self.audio_file.stem}.aligned_lyrics.json"
-        )
+        self.transcription_path = self.cache_dir / f"{self.audio_file.stem}.transcription.json"
+        self.aligned_lyrics_path = self.cache_dir / f"{self.audio_file.stem}.aligned_lyrics.json"
         self.transcription = None
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -388,23 +389,27 @@ class LyricsAligner:
             print(f"\nAttempt {try_num + 1} to fix alignment")
             # pass 1: find best matches
             for line in raw_lyrics:
-                segment = lyrics.find_best_match(
-                    line, similarity_threshold=0.9, max_try_num=3
-                )
-                if not segment:
-                    print(f"Couldn't find match for {line}")
+                if not line.strip():
                     continue
-                print(f"Matched {line} to {segment}")
+                segment = lyrics.find_best_match(line, similarity_threshold=0.9, max_try_num=3)
+                if not segment:
+                    print(f"Couldn't find match for: {line}")
+                    continue
+                print(f"Matched: {line} ->> {segment}")
 
             # pass 2: process segments where there's no match
             for segment in lyrics.segments:
-                print(segment)
                 if segment.match_type not in (MatchType.DIRECT, MatchType.SIMILAR):
-                    print(f"Processing segment {segment}")
+                    print(f"Processing segment: {segment}")
                     for line in raw_lyrics:
-                        result = lyrics.split_seg_by_text(
-                            segment, line, similarity_threshold=0.9
-                        )
+                        seg = lyrics.verify_next_segment(segment, line, similarity_threshold=0.8)
+                        if seg:
+                            print(f"Matched: {line} ->> {seg.text}")
+                            continue
+                        seg = lyrics.split_seg_by_text(segment, line, similarity_threshold=0.8)
+                        if seg and len(seg) > 1:
+                            print(f"Matched: {line} ->> {[seg.text for seg in seg]}")
+                            continue
 
             try_num += 1
         return lyrics
@@ -474,15 +479,9 @@ class LyricsAligner:
                         instrumental += sources[0, i]
 
                 # Safe vocal enhancement
-                vocals = torch.clamp(
-                    vocals * 1.5, -1, 1
-                )  # Increase vocal presence safely
-                vocals = (
-                    vocals + torch.clamp(vocals - vocals.roll(1, -1), -0.5, 0.5) * 0.3
-                )  # Enhance clarity
-                vocals = (
-                    vocals + torch.clamp(vocals - vocals.roll(2, -1), -0.2, 0.2) * 0.1
-                )  # Enhance harmonicity
+                vocals = torch.clamp(vocals * 1.5, -1, 1)  # Increase vocal presence safely
+                vocals = vocals + torch.clamp(vocals - vocals.roll(1, -1), -0.5, 0.5) * 0.3  # Enhance clarity
+                vocals = vocals + torch.clamp(vocals - vocals.roll(2, -1), -0.2, 0.2) * 0.1  # Enhance harmonicity
 
             finally:
                 # Clean up CUDA memory
@@ -493,9 +492,7 @@ class LyricsAligner:
                 vocals = vocals.cpu()
                 instrumental = instrumental.cpu()
 
-            print(
-                f"Saving vocals shape: {vocals.shape}, instrumental shape: {instrumental.shape}"
-            )
+            print(f"Saving vocals shape: {vocals.shape}, instrumental shape: {instrumental.shape}")
             self.save_track(self.vocals_path, vocals, sr)
             self.save_track(self.instr_path, instrumental, sr)
 
