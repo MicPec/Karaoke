@@ -295,6 +295,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "simpleaudio" },
+    { name = "tinytag" },
     { name = "torch" },
     { name = "torchaudio" },
 ]
@@ -315,6 +316,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "rich", specifier = ">=13.9.4" },
     { name = "simpleaudio", specifier = ">=1.0.4" },
+    { name = "tinytag", specifier = ">=2.0.0" },
     { name = "torch", specifier = ">=2.1.0" },
     { name = "torchaudio", specifier = ">=2.1.0" },
 ]
@@ -1115,6 +1117,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f2/bb/4513da71cac187383541facd0291c4572b03ec23c561de5811781bbd988f/tiktoken-0.9.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:cc156cb314119a8bb9748257a2eaebd5cc0753b6cb491d26694ed42fc7cb3139", size = 1195649 },
     { url = "https://files.pythonhosted.org/packages/fa/5c/74e4c137530dd8504e97e3a41729b1103a4ac29036cbfd3250b11fd29451/tiktoken-0.9.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:cd69372e8c9dd761f0ab873112aba55a0e3e506332dd9f7522ca466e817b1b7a", size = 1258465 },
     { url = "https://files.pythonhosted.org/packages/de/a8/8f499c179ec900783ffe133e9aab10044481679bb9aad78436d239eee716/tiktoken-0.9.0-cp313-cp313-win_amd64.whl", hash = "sha256:5ea0edb6f83dc56d794723286215918c1cde03712cbbafa0348b33448faf5b95", size = 894669 },
+]
+
+[[package]]
+name = "tinytag"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/21/7a/04f50e2c660862b9929a06d710968b2520ae1bf215ed57a9972065d0aeef/tinytag-2.0.0.tar.gz", hash = "sha256:d041f53d15553bb148549bfbc7feab445caf7105ba95fa2ecb9827bb06b62275", size = 35367 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/60/5440472b05e761d703240e222f7451c86eaca9ae66bf7c66defb26e76772/tinytag-2.0.0-py3-none-any.whl", hash = "sha256:971b9dceae2d1de73b5e8300639ea0b41454633b899426e702aed15f0e72a9b4", size = 30734 },
 ]
 
 [[package]]
