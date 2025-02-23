@@ -7,6 +7,7 @@ import simpleaudio as sa
 from pydub import AudioSegment
 from pydub.playback import play
 from typing import List, Optional
+from tinytag import TinyTag
 
 
 class KaraokePlayer:
@@ -49,7 +50,7 @@ class KaraokePlayer:
         vocals = AudioSegment.from_file(self.aligner.get_vocals())
         instrumental = AudioSegment.from_file(self.aligner.get_instr())
 
-        vocals = vocals - 15
+        vocals = vocals - 12
         # Mix vocals and instrumental
         mixed = vocals.overlay(instrumental)
 
@@ -69,10 +70,7 @@ class KaraokePlayer:
             while True:
                 current_time = time.time() - start_time
                 for segment in aligned_lyrics:
-                    if (
-                        segment.start <= current_time <= segment.end
-                        and segment != last_displayed
-                    ):
+                    if segment.start <= current_time <= segment.end and segment != last_displayed:
                         print(f"\033[K{segment}")  # Clear line and print lyrics
                         last_displayed = segment
                         break
@@ -103,7 +101,12 @@ def main():
 
     try:
         # Initialize player and process audio
-        player = KaraokePlayer(args.audio, args.title, args.author)
+        audio_tags = TinyTag.get(args.audio)
+
+        title = audio_tags.title if args.title is None else args.title
+        author = audio_tags.artist if args.author is None else args.author
+
+        player = KaraokePlayer(args.audio, title, author)
         aligned_lyrics = player.process_audio(force=args.force)
 
         if not aligned_lyrics:

@@ -127,8 +127,8 @@ class Segment:
         if rebase_time != 0.0:
             other.rebase(rebase_time)
         if self.end > other.start:
-            raise ValueError("Cannot join segments that overlap")
-            # other.rebase(self.end)
+            # raise ValueError("Cannot join segments that overlap")
+            other.rebase(self.end)
         self.words.extend(other.words)
         self.match_type = MatchType.JOIN
         self.match_confidence = max(self.match_confidence, other.match_confidence)
